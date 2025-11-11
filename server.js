@@ -2,24 +2,15 @@ import env from "dotenv";
 import express from "express";
 import bodyParser from "body-parser";
 import twilio from "twilio";
-import pg from "pg";
-import cron from "node-cron";
+import { PrismaClient } from "@prisma/client";
 import moment from "moment";
+import Scheduler from "./reminders/scheduler";
 
 env.config();
 const app = express();
-const initDB = app.use(bodyParser.urlencoded({ extended: true }));
+app.use(bodyParser.urlencoded({ extended: true }));
 app.use(bodyParser.json());
-
-const db = new pg.Client({
-  user: process.env.PG_USER,
-  host: process.env.PG_HOST,
-  database: process.env.PG_DATABASE,
-  password: process.env.PG_PASSWORD,
-  port: process.env.PG_PORT,
-});
-
-db.connect();
+const prisma = new PrismaClient();
 
 const port = process.env.PORT || 3000;
 
@@ -29,20 +20,8 @@ const twilioClient = twilio(
 );
 
 const createTable = async () => {
-  await db.query(`
-    CREATE TABLE IF NOT EXISTS reminders (
-      id SERIAL PRIMARY KEY,
-      phone VARCHAR(20),
-      time TIMESTAMP,
-      message TEXT
-    );
-  `);
-  console.log("Table created successfully");
+  console.log("Prisma is managing the tables.");
 };
-
-createTable();
-
-const reminders = {};
 
 app.post("/whatsapp", async (req, res) => {
   const incomingMessage = req.body.Body.toLowerCase();
@@ -71,7 +50,7 @@ app.post("/whatsapp", async (req, res) => {
     } else {
       reminders[from] = {
         stage: "awaiting_message",
-        time: reminderTime.format("YYYY-MM-DD HH:mm:ss"), // Store the timestamp in a valid format
+        time: reminderTime.format("YYYY-MM-DD HH:mm:ss"), 
       };
       responseMessage = "Please enter the reminder message.";
     }
@@ -80,10 +59,13 @@ app.post("/whatsapp", async (req, res) => {
     const reminderTime = reminders[from].time;
     const phoneNumber = from;
 
-    await db.query(
-      "INSERT INTO reminders (phone_number, reminder_time, message) VALUES ($1, $2, $3)",
-      [phoneNumber, reminderTime, reminderMessage]
-    );
+    await prisma.reminder.create({
+      data: {
+        phone: phoneNumber,
+        time: new Date(reminderTime),
+        message: reminderMessage,
+      },
+    });
 
     responseMessage = `Reminder set for ${reminderTime}.`;
     delete reminders[from];
@@ -102,23 +84,8 @@ app.post("/whatsapp", async (req, res) => {
   res.send("<Response></Response>");
 });
 
-cron.schedule("* * * * *", async () => {
-  const now = moment().format("YYYY-MM-DD HH:mm:ss");
-  const reminders = await db.query(
-    "SELECT * FROM reminders WHERE reminder_time <= $1",
-    [now]
-  );
+Scheduler();
 
-  reminders.rows.forEach(async (reminder) => {
-    await twilioClient.messages.create({
-      from: process.env.TWILIO_PHONE_NUMBER,
-      to: reminder.phone_number,
-      body: `Reminder: ${reminder.message}`,
-    });
-
-    await db.query("DELETE FROM reminders WHERE id = $1", [reminder.id]);
-  });
-});
 app.get("/", (req, res) => {
   res.send("Hosted");
 });
